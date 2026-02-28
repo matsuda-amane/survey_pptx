@@ -11,7 +11,12 @@ __pycache__/
 .env.local
 *.local
 
-# アップロード・生成ファイル（テンプレートとサンプルは残す）
+# サンプル・生成物（リポジトリに含めない）
+sample_survey.csv
+sample_survey.pptx
+sample_out.pptx
+
+# アップロード・生成ファイル
 data/*.xlsx
 data/*.csv
 data/*.pptx
