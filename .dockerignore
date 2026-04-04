@@ -1,0 +1,12 @@
+.venv
+venv
+__pycache__
+*.py[cod]
+.git
+.gitignore
+.env
+.env.*
+data/*.xlsx
+data/*.csv
+data/*.pptx
+*.md

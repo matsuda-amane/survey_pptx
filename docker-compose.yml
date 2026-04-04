@@ -1,0 +1,8 @@
+services:
+  survey-pptx:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      # ローカル確認用の既定値。本番では必ず上書きすること。
+      STREAMLIT_PASSWORD: ${STREAMLIT_PASSWORD:-dev}

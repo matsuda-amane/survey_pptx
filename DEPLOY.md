@@ -26,7 +26,7 @@ git branch -M main
 git push -u origin main
 ```
 
-> **注意**: `template/design.pptx` と `app.py` は必ずリポジトリに含めてください。`data/` 内の実データ（xlsx/csv/pptx）は .gitignore で除外されます。
+> **注意**: `template/template_ligare.pptx`・`template/template_amane.pptx`（内蔵フォーマット）と `app.py` は必ずリポジトリに含めてください。`data/` 内の実データ（xlsx/csv/pptx）は .gitignore で除外されます。
 
 ---
 
@@ -82,4 +82,4 @@ git push
 
 - **無料枠**: 一定時間アクセスがないとアプリがスリープし、次回アクセス時に起動まで数十秒かかることがあります
 - **パスワード**: シークレットは Streamlit の画面から再設定できます（Settings → Secrets）
-- **テンプレート**: `template/design.pptx` がリポジトリに含まれている必要があります（PPTX 生成に使用します）
+- **テンプレート**: `template/template_ligare.pptx` と `template/template_amane.pptx` がリポジトリに含まれている必要があります（Web では生成前にどちらかを選択可能）

@@ -66,7 +66,24 @@ SCALE_4_COLORS = [
 ]
 
 # テンプレート（既存6枚はサンプルとして残す）
-DEFAULT_TEMPLATE_PATH = Path(__file__).resolve().parent / "template" / "design.pptx"
+TEMPLATE_DIR = Path(__file__).resolve().parent / "template"
+DEFAULT_TEMPLATE_PATH = TEMPLATE_DIR / "template_ligare.pptx"
+
+# 内蔵テンプレ（ファイル名, UI 用の短い名前）。スライドマスタのレイアウト順は互いに同一であること。
+BUILTIN_PPTX_SPECS: tuple[tuple[str, str], ...] = (
+    ("template_ligare.pptx", "Ligare"),
+    ("template_amane.pptx", "Amane"),
+)
+
+
+def list_builtin_templates() -> list[tuple[str, Path]]:
+    """存在する内蔵テンプレのみ (ラベル, パス) を返す（Streamlit の selectbox 用）。"""
+    out: list[tuple[str, Path]] = []
+    for filename, short in BUILTIN_PPTX_SPECS:
+        p = TEMPLATE_DIR / filename
+        if p.is_file():
+            out.append((f"{short}（{filename}）", p.resolve()))
+    return out
 
 # テンプレートのレイアウト番号（スライドマスタの名前と対応）
 LAYOUT_TITLE = 0          # タイトル
@@ -810,7 +827,14 @@ def main() -> None:
     parser.add_argument("--title",    default="", help="タイトル（省略時: Survey Name列 or ファイル名）")
     parser.add_argument("--subtitle", default="", help="サブタイトル")
     parser.add_argument("--encoding", default="utf-8", help="CSVエンコーディング")
-    parser.add_argument("--template", default="", help="テンプレートPPTXパス（省略時: template/design.pptx）")
+    parser.add_argument("--template", default="", help="テンプレートPPTXパス（指定時は最優先）")
+    parser.add_argument(
+        "--builtin-template",
+        choices=[fn for fn, _ in BUILTIN_PPTX_SPECS],
+        default=None,
+        metavar="FILE",
+        help="内蔵テンプレ（例: template_amane.pptx）。--template 未指定時のみ有効。省略時は template_ligare.pptx",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.file)
@@ -819,7 +843,15 @@ def main() -> None:
         sys.exit(1)
 
     output_path = args.output or str(input_path.with_suffix(".pptx"))
-    template_path = args.template or None
+    if args.template.strip():
+        template_path = args.template.strip()
+    elif args.builtin_template:
+        template_path = str(TEMPLATE_DIR / args.builtin_template)
+        if not Path(template_path).is_file():
+            print(f"エラー: 内蔵テンプレが見つかりません: {template_path}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        template_path = None
     convert(str(input_path), output_path,
             title=args.title, subtitle=args.subtitle, encoding=args.encoding,
             template_path=template_path)

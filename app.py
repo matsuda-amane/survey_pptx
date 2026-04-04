@@ -16,10 +16,10 @@ import streamlit as st
 
 # 同フォルダの survey_to_pptx を利用
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from survey_to_pptx import convert, load_data, classify_columns
+from survey_to_pptx import convert, load_data, classify_columns, list_builtin_templates
 
-# テンプレートはプロジェクト内の template/design.pptx
-DEFAULT_TEMPLATE = Path(__file__).resolve().parent / "template" / "design.pptx"
+_TEMPLATE_ROOT = Path(__file__).resolve().parent / "template"
+_DEFAULT_TEMPLATE = _TEMPLATE_ROOT / "template_ligare.pptx"
 
 st.set_page_config(
     page_title="アンケート → PPTX 変換",
@@ -139,6 +139,18 @@ if uploaded is not None:
     with col2:
         subtitle = st.text_input("サブタイトル（任意）", placeholder="例: 2026年Q1")
 
+    _builtins = list_builtin_templates()
+    if _builtins:
+        _labels = [x[0] for x in _builtins]
+        _tmpl_choice = st.selectbox(
+            "PPTX のフォーマット（テンプレート）",
+            _labels,
+            help="見た目・背景は PowerPoint で編集した template 内の .pptx を切り替えます。レイアウト構成は揃えてください。",
+        )
+        chosen_template_path = dict(_builtins)[_tmpl_choice]
+    else:
+        chosen_template_path = _DEFAULT_TEMPLATE if _DEFAULT_TEMPLATE.exists() else None
+
     run = st.button("PPTX を生成", type="primary", disabled=not selected_columns)
 
     if run and selected_columns:
@@ -154,7 +166,7 @@ if uploaded is not None:
                         out_df.to_csv(input_path, index=False, encoding=encoding)
 
                     output_path = Path(tmp) / "アンケート結果.pptx"
-                    template_path = str(DEFAULT_TEMPLATE) if DEFAULT_TEMPLATE.exists() else None
+                    template_path = str(chosen_template_path) if chosen_template_path and chosen_template_path.exists() else None
 
                     buf = io.StringIO()
                     old_stdout = sys.stdout
