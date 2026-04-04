@@ -365,10 +365,10 @@ else:
     tabs = st.tabs([f"パターン {i + 1}" for i in range(npat)])
     for pi, tab in enumerate(tabs):
         with tab:
-            pn = st.text_input("パターン名", value=f"パターン{i + 1}", key=f"p{pi}_name")
+            pn = st.text_input("パターン名", value=f"パターン{pi + 1}", key=f"p{pi}_name")
             pfn = st.text_input(
                 "出力ファイル名（.pptx の前の部分）",
-                value=_safe_pptx_filename(pn, f"report_{i + 1}").replace(".pptx", ""),
+                value=_safe_pptx_filename(pn, f"report_{pi + 1}").replace(".pptx", ""),
                 key=f"p{pi}_fn",
             )
             st.markdown("**スライドに含める列**")
@@ -396,7 +396,7 @@ else:
                     "name": pn,
                     "title": "",
                     "subtitle": "",
-                    "filename": _safe_pptx_filename(pfn, f"report_{i + 1}"),
+                    "filename": _safe_pptx_filename(pfn, f"report_{pi + 1}"),
                     "columns": sel,
                     "layouts": layouts_map,
                 }
