@@ -730,11 +730,26 @@ def _add_stat_card(slide, title: str, value: str,
 
 # ── メイン変換処理 ────────────────────────────────────────────────────────────
 
-def convert(data_path: str, output_path: str,
+def convert(data_path: str | None, output_path: str,
             title: str = "", subtitle: str = "",
             encoding: str = "utf-8",
-            template_path: str | Path | None = None) -> None:
-    df = load_data(data_path, encoding)
+            template_path: str | Path | None = None,
+            df: pd.DataFrame | None = None) -> None:
+    """
+    data_path または df のどちらか必須。df を渡すとメモリ上の DataFrame を変換し、
+    data_path の読み込みは行わない（CLI は従来どおりファイルパスのみ）。
+    """
+    if df is None:
+        if not data_path:
+            raise ValueError("data_path または df のどちらかが必要です")
+        df = load_data(data_path, encoding)
+        source_label = str(data_path)
+        stem_fallback = data_path
+    else:
+        df = df.copy()
+        source_label = str(data_path) if data_path else "(DataFrame)"
+        stem_fallback = data_path if data_path else output_path
+
     total = len(df)
 
     if not title and "Survey Name" in df.columns:
@@ -742,11 +757,11 @@ def convert(data_path: str, output_path: str,
         if len(val):
             title = str(val.iloc[0])
     if not title:
-        title = Path(data_path).stem
+        title = Path(str(stem_fallback)).stem
 
     col_types = classify_columns(df)
 
-    print(f"ファイル : {data_path}")
+    print(f"ファイル : {source_label}")
     print(f"回答数   : {total} 件 / {len(df.columns)} 列")
     print()
     for col, t in col_types.items():
