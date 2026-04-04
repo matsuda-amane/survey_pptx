@@ -6,6 +6,7 @@
 起動: STREAMLIT_PASSWORD=your_password streamlit run app.py
 """
 
+import hashlib
 import io
 import json
 import os
@@ -18,9 +19,15 @@ from pathlib import Path
 
 import streamlit as st
 
-# 同フォルダの survey_to_pptx を利用
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from survey_to_pptx import convert, load_data, classify_columns, list_builtin_templates
+from survey_to_pptx import (
+    COLUMN_LAYOUT_AUTO,
+    COLUMN_LAYOUT_CHOICES_UI,
+    convert,
+    load_data,
+    classify_columns,
+    list_builtin_templates,
+)
 
 _TEMPLATE_ROOT = Path(__file__).resolve().parent / "template"
 _DEFAULT_TEMPLATE = _TEMPLATE_ROOT / "template_ligare.pptx"
@@ -31,15 +38,23 @@ st.set_page_config(
     layout="centered",
 )
 
-# ── セッション初期化 ─────────────────────────────────────────────────────────
-def _init_batch_session():
+
+def _init_session():
     if "column_presets" not in st.session_state:
         st.session_state.column_presets = {}
     if "audit_log" not in st.session_state:
         st.session_state.audit_log = []
+    if "wizard_loaded" not in st.session_state:
+        st.session_state.wizard_loaded = False
+    if "wizard_upload_sig" not in st.session_state:
+        st.session_state.wizard_upload_sig = None
 
 
-_init_batch_session()
+_init_session()
+
+
+def _col_widget_hash(col: str) -> str:
+    return hashlib.sha256(str(col).encode("utf-8")).hexdigest()[:14]
 
 
 def _safe_pptx_filename(name: str, fallback: str) -> str:
@@ -51,36 +66,12 @@ def _safe_pptx_filename(name: str, fallback: str) -> str:
     return base
 
 
-def _merged_sponsor_columns(standard_cols: list[str], sponsor_extra: list[str]) -> list[str]:
-    seen = set(standard_cols)
-    out = list(standard_cols)
-    for c in sponsor_extra:
-        if c not in seen:
-            out.append(c)
-            seen.add(c)
-    return out
-
-
-def _columns_for_profile(
-    profile: str, standard_cols: list[str], sponsor_extra: list[str]
-) -> list[str]:
-    if profile == "sponsor":
-        return _merged_sponsor_columns(standard_cols, sponsor_extra)
-    return list(standard_cols)
-
-
-def _apply_row_filter(
-    df,
-    use_filter: bool,
-    filter_col: str | None,
-    filter_values: list,
-):
+def _apply_row_filter(df, use_filter: bool, filter_col: str | None, filter_values: list):
     if not use_filter or not filter_col or not filter_values:
         return df
     if filter_col not in df.columns:
         return df
     chosen = {str(v).strip() for v in filter_values}
-    s = df[filter_col].dropna().astype(str).str.strip()
     mask = df[filter_col].astype(str).str.strip().isin(chosen)
     return df.loc[mask]
 
@@ -92,6 +83,7 @@ def _run_convert_captured(
     subtitle: str,
     encoding: str,
     template_path: str | None,
+    column_layout: dict[str, str],
 ) -> str:
     buf_tr = io.StringIO()
     old_stdout = sys.stdout
@@ -105,13 +97,13 @@ def _run_convert_captured(
             encoding=encoding,
             template_path=template_path,
             df=sub_df,
+            column_layout=column_layout or None,
         )
     finally:
         sys.stdout = old_stdout
     return buf_tr.getvalue()
 
 
-# ── ログイン ─────────────────────────────────────────────────────────────────
 def _get_expected_password() -> str:
     return (os.environ.get("STREAMLIT_PASSWORD") or "").strip()
 
@@ -138,89 +130,62 @@ def _check_login():
 
 _check_login()
 
-# ログアウト（サイドバー）
 with st.sidebar:
     if st.button("🚪 ログアウト"):
         st.session_state.logged_in = False
         st.rerun()
 
-# ── メイン ───────────────────────────────────────────────────────────────────
 st.title("📊 アンケート結果 → PPTX 変換")
 st.caption(
-    "CSV または XLSX をアップロードし、列を選んで PowerPoint を生成します。登壇者別レポートでは協賛向けに追加列を開示できます。（社内利用）"
+    "アップロード後にテンプレートと出力パターンを決めてから読み込み、列とレイアウトを設定して PowerPoint を生成します。"
 )
 
+# ── ステップ0: アップロード + 初期設定（読み込み前は中身を表示しない） ───────
 uploaded = st.file_uploader(
-    "アンケートファイルを選択",
+    "1. アンケートファイルを選択（CSV / XLSX）",
     type=["csv", "xlsx"],
-    help="CSV または Excel（.xlsx）を選択してください",
+    help="この時点ではファイル内容は読み込みません。下の設定のあと「CSV を読み込む」を押してください。",
 )
 
 if uploaded is not None:
-    suffix = ".xlsx" if uploaded.name.lower().endswith(".xlsx") else ".csv"
-    is_xlsx = suffix == ".xlsx"
+    sig = f"{uploaded.name}:{uploaded.size}"
+    if st.session_state.wizard_upload_sig != sig:
+        st.session_state.wizard_upload_sig = sig
+        st.session_state.wizard_loaded = False
 
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(uploaded.getvalue())
-        tmp_path = tmp.name
-    try:
-        encoding = st.selectbox(
-            "CSV の文字コード（CSV の場合）",
-            ["utf-8", "utf-8-sig", "shift_jis", "cp932"],
-            index=0,
+if not st.session_state.wizard_loaded:
+    builtins = list_builtin_templates()
+    if builtins:
+        tmpl_labels = [x[0] for x in builtins]
+        tmpl_pick = st.selectbox(
+            "2. テンプレート（PowerPoint の見た目）",
+            tmpl_labels,
+            help="Ligare / Amane など、2 種類から選択します。",
         )
-        df = load_data(tmp_path, encoding=encoding)
-        col_types = classify_columns(df)
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
-
-    st.subheader("ファイルの中身")
-    preview_rows = min(50, len(df))
-    st.dataframe(
-        df.head(preview_rows),
-        use_container_width=True,
-        height=min(400, 35 * preview_rows + 38),
-    )
-    if len(df) > preview_rows:
-        st.caption(f"先頭 {preview_rows} 件を表示（全 {len(df)} 件）")
-
-    type_labels = {
-        "personal": "⛔ 個人情報",
-        "metadata": "ℹ️ メタデータ",
-        "categorical": "📊 選択式",
-        "high_cardinality": "📊 選択式（多め）",
-        "text": "📝 自由記述",
-        "empty": "— 空",
-        "appendix_company": "📋 Appendix（会社名）",
-    }
-
-    exclude_personal = st.checkbox(
-        "個人情報として検出された列を初期選択から除外する",
-        value=True,
-        help="氏名・メール・電話番号・ID などは通常 PPTX に含めません",
-    )
-    if exclude_personal:
-        default_cols = [c for c in df.columns if col_types.get(c) != "personal"]
+        chosen_template_path = dict(builtins)[tmpl_pick]
     else:
-        default_cols = list(df.columns)
+        chosen_template_path = _DEFAULT_TEMPLATE if _DEFAULT_TEMPLATE.exists() else None
 
-    output_mode = st.radio(
-        "出力モード",
-        ["単一レポート（1 本の PPTX）", "登壇者別レポート（ZIP・複数本）"],
+    num_patterns = st.number_input(
+        "3. 出力する PowerPoint のパターン数（同じ CSV から最大いくつ作るか）",
+        min_value=1,
+        max_value=8,
+        value=1,
+        step=1,
+        help="2 以上にすると、一般向け・協賛向けのように内容違いのセットをそれぞれ設定できます。",
+    )
+
+    delivery_mode = st.radio(
+        "4. 納品の形",
+        ["パターン別（パターン数ぶんのファイル）", "登壇者別 ZIP（各行フィルタ＋パターン割当）"],
         horizontal=True,
     )
 
-    _builtins = list_builtin_templates()
-    if _builtins:
-        _labels = [x[0] for x in _builtins]
-        _tmpl_choice = st.selectbox(
-            "PPTX のフォーマット（テンプレート）",
-            _labels,
-            help="見た目・背景は template 内ので切り替えます。",
-        )
-        chosen_template_path = dict(_builtins)[_tmpl_choice]
-    else:
-        chosen_template_path = _DEFAULT_TEMPLATE if _DEFAULT_TEMPLATE.exists() else None
+    encoding = st.selectbox(
+        "CSV の文字コード（CSV を読み込むときに使用）",
+        ["utf-8", "utf-8-sig", "shift_jis", "cp932"],
+        index=0,
+    )
 
     template_path_str = (
         str(chosen_template_path)
@@ -228,341 +193,425 @@ if uploaded is not None:
         else None
     )
 
-    if output_mode.startswith("単一"):
-        st.subheader("出力に含める列")
-        st.caption("PPTX に含めたい列だけを選んでください。")
+    can_load = uploaded is not None and template_path_str is not None
+    if st.button("CSV / XLSX を読み込む", type="primary", disabled=not can_load):
+        st.session_state.wizard_loaded = True
+        st.session_state.upload_bytes = uploaded.getvalue()
+        st.session_state.upload_name = uploaded.name
+        st.session_state.upload_suffix = ".xlsx" if uploaded.name.lower().endswith(".xlsx") else ".csv"
+        st.session_state.wizard_encoding = encoding
+        st.session_state.wizard_num_patterns = int(num_patterns)
+        st.session_state.wizard_delivery_mode = delivery_mode
+        st.session_state.wizard_template = template_path_str
+        st.rerun()
 
-        selected_columns = st.multiselect(
-            "列を選択",
-            options=list(df.columns),
-            default=default_cols if default_cols else list(df.columns),
-            format_func=lambda c: f"{c}  —  {type_labels.get(col_types.get(c, ''), col_types.get(c, '?'))}",
-        )
+    st.info(
+        "ファイルを選び、テンプレート・パターン数・納品の形を指定してから **CSV / XLSX を読み込む** を押してください。"
+        "（読み込み前はプレビューしません。）"
+    )
+    st.stop()
 
-        if not selected_columns:
-            st.warning("少なくとも1列を選択してください。")
+template_path_str = st.session_state.wizard_template
 
-        col1, col2 = st.columns(2)
-        with col1:
-            title = st.text_input(
-                "タイトル（任意）", placeholder="省略時は Survey Name 列またはファイル名"
+# ── ステップ1: メモリ上にデータ読込・プレビュー ─────────────────────────────
+raw = st.session_state.upload_bytes
+suffix = st.session_state.upload_suffix
+enc = st.session_state.wizard_encoding
+
+with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+    tmp.write(raw)
+    tmp_path = tmp.name
+try:
+    df = load_data(tmp_path, encoding=enc)
+    col_types = classify_columns(df)
+finally:
+    Path(tmp_path).unlink(missing_ok=True)
+
+type_labels = {
+    "personal": "⛔ 個人情報",
+    "metadata": "ℹ️ メタデータ",
+    "categorical": "📊 選択式",
+    "high_cardinality": "📊 選択式（多め）",
+    "text": "📝 自由記述",
+    "empty": "— 空",
+    "appendix_company": "📋 Appendix（会社名）",
+}
+
+def _fmt_col_option(c: str) -> str:
+    return f"{c}  —  {type_labels.get(col_types.get(c, ''), col_types.get(c, '?'))}"
+
+
+st.success(
+    f"読み込み済み: **{st.session_state.upload_name}**（{len(df)} 行 / {len(df.columns)} 列）"
+)
+st.caption(
+    f"読み込み時の設定: パターン数 **{st.session_state.wizard_num_patterns}** ／ **{st.session_state.wizard_delivery_mode}**。"
+    "テンプレート・パターン数・納品の形を変える場合は、下の「設定をやり直す」から最初の手順に戻ってください。"
+)
+if st.button("設定をやり直す（読み込み前に戻る）"):
+    st.session_state.wizard_loaded = False
+    st.session_state.upload_bytes = None
+    st.rerun()
+
+st.subheader("データプレビュー")
+preview_rows = min(50, len(df))
+st.dataframe(
+    df.head(preview_rows),
+    use_container_width=True,
+    height=min(400, 35 * preview_rows + 38),
+)
+if len(df) > preview_rows:
+    st.caption(f"先頭 {preview_rows} 件を表示（全 {len(df)} 件）")
+
+exclude_personal = st.checkbox(
+    "個人情報列を列リストの初期候補から外す",
+    value=True,
+    help="チェックを外すと個人情報列も選べます（通常はオフのまま推奨）。",
+)
+if exclude_personal:
+    default_cols = [c for c in df.columns if col_types.get(c) != "personal"]
+else:
+    default_cols = list(df.columns)
+
+layout_keys = [x[0] for x in COLUMN_LAYOUT_CHOICES_UI]
+layout_labels = [x[1] for x in COLUMN_LAYOUT_CHOICES_UI]
+layout_label_to_key = dict(zip(layout_labels, layout_keys))
+
+npat = int(st.session_state.wizard_num_patterns)
+delivery = st.session_state.wizard_delivery_mode
+
+# ── 各パターン: 列 multiselect + 列ごとのレイアウト ─────────────────────────
+pattern_specs = []
+
+if npat == 1:
+    st.subheader("パターン 1 の内容")
+    pn = st.text_input("パターン名（メモ用）", value="レポート", key="p0_name")
+    c1, c2 = st.columns(2)
+    with c1:
+        pt = st.text_input("スライドタイトル（任意）", key="p0_title", value="")
+    with c2:
+        ps = st.text_input("スライドサブタイトル（任意）", key="p0_sub", value="")
+    pfn = st.text_input(
+        "出力ファイル名",
+        value=_safe_pptx_filename(pn, "report").replace(".pptx", ""),
+        key="p0_fn",
+    )
+    sel = st.multiselect(
+        "出力に含める列",
+        options=list(df.columns),
+        default=default_cols if default_cols else list(df.columns),
+        format_func=_fmt_col_option,
+        key="p0_cols",
+    )
+    layouts_map = {}
+    if sel:
+        st.markdown("**列ごとのレイアウト**")
+        for col in sel:
+            h = _col_widget_hash(col)
+            opt_label = st.selectbox(
+                f"`{col}`",
+                layout_labels,
+                index=0,
+                key=f"p0_lay_{h}",
+                label_visibility="visible",
             )
-        with col2:
-            subtitle = st.text_input("サブタイトル（任意）", placeholder="例: 2026年Q1")
-
-        run = st.button("PPTX を生成", type="primary", disabled=not selected_columns)
-
-        if run and selected_columns:
-            with st.spinner("PPTX を生成しています…"):
-                try:
-                    with tempfile.TemporaryDirectory() as tmp:
-                        input_path = Path(tmp) / f"input{suffix}"
-                        out_df = df[[c for c in selected_columns if c in df.columns]]
-                        if is_xlsx:
-                            out_df.to_excel(input_path, index=False)
-                        else:
-                            out_df.to_csv(input_path, index=False, encoding=encoding)
-
-                        output_path = Path(tmp) / "アンケート結果.pptx"
-
-                        buf = io.StringIO()
-                        old_stdout = sys.stdout
-                        sys.stdout = buf
-                        try:
-                            convert(
-                                str(input_path),
-                                str(output_path),
-                                title=title.strip(),
-                                subtitle=subtitle.strip(),
-                                encoding=encoding,
-                                template_path=template_path_str,
-                            )
-                        finally:
-                            sys.stdout = old_stdout
-                        log = buf.getvalue()
-
-                        if not output_path.exists():
-                            st.error("PPTX の生成に失敗しました。")
-                            st.code(log)
-                        else:
-                            st.success("PPTX を生成しました。")
-                            st.download_button(
-                                label="📥 アンケート結果.pptx をダウンロード",
-                                data=output_path.read_bytes(),
-                                file_name="アンケート結果.pptx",
-                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                            )
-                            with st.expander("変換ログ"):
-                                st.text(log)
-                except Exception as e:
-                    st.error(f"エラー: {e}")
-                    st.exception(e)
-
-    else:
-        st.info(
-            "**データの切り分け**: 1 ファイルに全会場・全登壇が入っているときは、各登壇者で「行フィルタ」を有効にし、"
-            "セッション識別列と値（複数可）を選びます。**フィルタなし**は全行を対象にします（全員同一データに列だけ変える用途や、"
-            "事前に別ツールで行を絞った CSV を載せる運用向け）。登壇者ごとに**別ファイル**だけを渡す場合は、この画面では単一モードを"
-            "登壇者回数分ご利用ください（将来、複数アップロードに拡張可能です）。"
-        )
-
-        st.subheader("開示プロファイル別の列")
-        cols_std = st.multiselect(
-            "標準（一般登壇）向けに含める列",
-            options=list(df.columns),
-            default=default_cols if default_cols else list(df.columns),
-            format_func=lambda c: f"{c}  —  {type_labels.get(col_types.get(c, ''), col_types.get(c, '?'))}",
-            key="batch_cols_standard",
-        )
-        extra_default = [
-            c
-            for c in df.columns
-            if col_types.get(c) in ("appendix_company", "text") and c not in cols_std
-        ]
-        cols_sponsor_extra = st.multiselect(
-            "協賛向けに**追加で**含める列（標準の列に上乗せ）",
-            options=[c for c in df.columns if c not in cols_std],
-            default=[c for c in extra_default if c not in cols_std],
-            format_func=lambda c: f"{c}  —  {type_labels.get(col_types.get(c, ''), col_types.get(c, '?'))}",
-            key="batch_cols_sponsor_extra",
-        )
-
-        with st.expander("協賛で追加開示される列（差分プレビュー）"):
-            if cols_sponsor_extra:
-                st.write(sorted(cols_sponsor_extra))
-            else:
-                st.caption("協賛専用の追加列はありません（標準と同一の開示）。")
-
-        with st.expander("列プリセット（名前付きで保存・ファイルで共有）"):
-            preset_name = st.text_input("プリセット名", key="preset_name_input")
+            layouts_map[col] = layout_label_to_key[opt_label]
+    pattern_specs.append(
+        {
+            "name": pn,
+            "title": pt,
+            "subtitle": ps,
+            "filename": _safe_pptx_filename(pfn, "report"),
+            "columns": sel,
+            "layouts": layouts_map,
+        }
+    )
+else:
+    st.subheader("パターンごとの内容")
+    tabs = st.tabs([f"パターン {i + 1}" for i in range(npat)])
+    for pi, tab in enumerate(tabs):
+        with tab:
+            pn = st.text_input("パターン名", value=f"パターン{i + 1}", key=f"p{pi}_name")
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("現在の列セットを保存"):
-                    if not preset_name.strip():
-                        st.error("プリセット名を入力してください。")
-                    else:
-                        st.session_state.column_presets[preset_name.strip()] = {
-                            "standard": list(cols_std),
-                            "sponsor_extra": list(cols_sponsor_extra),
-                        }
-                        st.success(f"保存しました: {preset_name.strip()}")
+                pt = st.text_input("スライドタイトル（任意）", key=f"p{pi}_title", value="")
             with c2:
-                names = list(st.session_state.column_presets.keys())
-                load_pick = st.selectbox("読み込むプリセット", [""] + names, key="preset_load_pick")
-                if load_pick and st.button("このプリセットを列に適用"):
-                    p = st.session_state.column_presets[load_pick]
-                    valid = set(df.columns)
-                    st.session_state["batch_cols_standard"] = [
-                        c for c in p.get("standard", []) if c in valid
-                    ]
-                    st.session_state["batch_cols_sponsor_extra"] = [
-                        c for c in p.get("sponsor_extra", []) if c in valid
-                    ]
-                    st.rerun()
-
-            presets_blob = json.dumps(
-                st.session_state.column_presets, ensure_ascii=False, indent=2
+                ps = st.text_input("スライドサブタイトル（任意）", key=f"p{pi}_sub", value="")
+            pfn = st.text_input(
+                "出力ファイル名",
+                value=_safe_pptx_filename(pn, f"report_{i + 1}").replace(".pptx", ""),
+                key=f"p{pi}_fn",
             )
-            st.download_button(
-                "プリセット JSON をダウンロード",
-                data=presets_blob.encode("utf-8"),
-                file_name="survey_pptx_column_presets.json",
-                mime="application/json",
+            sel = st.multiselect(
+                "出力に含める列",
+                options=list(df.columns),
+                default=default_cols if default_cols and pi == 0 else [],
+                format_func=_fmt_col_option,
+                key=f"p{pi}_cols",
             )
-            up = st.file_uploader("プリセット JSON を読み込み", type=["json"], key="preset_upload")
-            if up is not None:
-                try:
-                    data = json.loads(up.getvalue().decode("utf-8"))
-                    if isinstance(data, dict):
-                        st.session_state.column_presets.update(data)
-                        st.success("セッションにマージしました。読み込むプリセットから選べます。")
-                    else:
-                        st.error("JSON はオブジェクト（名前→列リスト）形式である必要があります。")
-                except json.JSONDecodeError as e:
-                    st.error(f"JSON の解析に失敗しました: {e}")
-
-        if not cols_std:
-            st.warning("標準向けには少なくとも 1 列選んでください。")
-
-        n_speakers = st.number_input("登壇者数", min_value=1, max_value=8, value=3, step=1)
-
-        speaker_defs = []
-        for i in range(int(n_speakers)):
-            with st.expander(f"登壇者 {i + 1}", expanded=(i == 0)):
-                sp_name = st.text_input("表示名・ファイル名のもと", value=f"登壇者{i + 1}", key=f"sp_{i}_label")
-                profile = st.selectbox(
-                    "開示プロファイル",
-                    ["standard", "sponsor"],
-                    format_func=lambda x: "一般登壇（標準）" if x == "standard" else "協賛（標準＋追加列）",
-                    key=f"sp_{i}_profile",
-                )
-                t1, t2 = st.columns(2)
-                with t1:
-                    sp_title = st.text_input("スライドタイトル（任意）", key=f"sp_{i}_title", value="")
-                with t2:
-                    sp_sub = st.text_input("スライドサブタイトル（任意）", key=f"sp_{i}_sub", value="")
-
-                use_f = st.checkbox(
-                    "行フィルタを使う（セッションで絞り込む）",
-                    value=False,
-                    key=f"sp_{i}_use_filter",
-                )
-                filter_col = None
-                filter_vals = []
-                if use_f:
-                    filter_col = st.selectbox(
-                        "フィルタ列",
-                        [""] + list(df.columns),
-                        key=f"sp_{i}_fcol",
+            layouts_map = {}
+            if sel:
+                st.markdown("**列ごとのレイアウト**")
+                for col in sel:
+                    h = _col_widget_hash(f"{pi}_{col}")
+                    opt_label = st.selectbox(
+                        f"`{col}`",
+                        layout_labels,
+                        index=0,
+                        key=f"p{pi}_lay_{h}",
                     )
-                    if filter_col and filter_col in df.columns:
-                        uniques = sorted(
-                            df[filter_col].dropna().astype(str).str.strip().unique().tolist(),
-                            key=str,
-                        )
-                        if len(uniques) > 200:
-                            st.caption(f"選択肢が多いです（{len(uniques)} 件）。先頭 200 件のみ一覧します。")
-                            uniques = uniques[:200]
-                        filter_vals = st.multiselect(
-                            "含める値（複数可）",
-                            options=uniques,
-                            key=f"sp_{i}_fval",
-                        )
-
-                out_fn = st.text_input(
-                    "出力ファイル名",
-                    value=_safe_pptx_filename(sp_name, f"speaker_{i + 1}"),
-                    key=f"sp_{i}_file",
-                )
-
-                speaker_defs.append(
-                    {
-                        "index": i,
-                        "label": sp_name,
-                        "profile": profile,
-                        "title": sp_title,
-                        "subtitle": sp_sub,
-                        "use_filter": use_f,
-                        "filter_col": filter_col if filter_col else None,
-                        "filter_values": filter_vals,
-                        "out_name": out_fn,
-                    }
-                )
-
-        batch_run = st.button(
-            "登壇者分を一括生成（ZIP）",
-            type="primary",
-            disabled=not cols_std,
-        )
-
-        with st.expander("監査ログ（このブラウザセッション）"):
-            if not st.session_state.audit_log:
-                st.caption("まだ記録がありません。ZIP 一括生成すると追記されます。")
-            else:
-                for entry in reversed(st.session_state.audit_log[-30:]):
-                    st.json(entry)
-            if st.button("ログをクリア（セッション）"):
-                st.session_state.audit_log = []
-                st.rerun()
-
-        if batch_run and cols_std:
-            zip_buf = io.BytesIO()
-            results = []
-            combined_log = []
-
-            with st.spinner("各登壇者分の PPTX を生成しています…"):
-                with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for sp in speaker_defs:
-                        tag = sp["label"] or f"speaker{sp['index'] + 1}"
-                        try:
-                            sub = _apply_row_filter(
-                                df,
-                                sp["use_filter"],
-                                sp["filter_col"],
-                                sp["filter_values"],
-                            )
-                            if len(sub) == 0:
-                                results.append((tag, False, "フィルタ後が 0 件です"))
-                                combined_log.append(f"=== {tag} SKIP: 0 rows ===\n")
-                                continue
-
-                            use_cols = _columns_for_profile(
-                                sp["profile"], cols_std, cols_sponsor_extra
-                            )
-                            use_cols = [c for c in use_cols if c in sub.columns]
-                            if not use_cols:
-                                results.append((tag, False, "選択列がデータにありません"))
-                                continue
-
-                            sub_out = sub[use_cols]
-
-                            with tempfile.TemporaryDirectory() as tmpd:
-                                out_p = Path(tmpd) / "out.pptx"
-                                log_piece = _run_convert_captured(
-                                    out_p,
-                                    sub_out,
-                                    sp["title"],
-                                    sp["subtitle"],
-                                    encoding,
-                                    template_path_str,
-                                )
-                                combined_log.append(f"=== {tag} ===\n{log_piece}\n")
-
-                                if not out_p.exists():
-                                    results.append((tag, False, "PPTX が生成されませんでした"))
-                                    continue
-
-                                name_in_zip = _safe_pptx_filename(
-                                    sp["out_name"].replace(".pptx", ""),
-                                    f"report_{sp['index'] + 1}",
-                                )
-                                zf.writestr(name_in_zip, out_p.read_bytes())
-                                results.append((tag, True, f"{len(sub)} 件 / {len(use_cols)} 列"))
-
-                        except Exception as ex:
-                            results.append((tag, False, str(ex)))
-                            combined_log.append(f"=== {tag} ERROR: {ex} ===\n")
-
-            any_ok = any(ok for _, ok, _ in results)
-            for tag, ok, msg in results:
-                if ok:
-                    st.success(f"{tag}: OK（{msg}）")
-                else:
-                    st.error(f"{tag}: {msg}")
-
-            if any_ok:
-                st.download_button(
-                    label="📦 ZIP をダウンロード（全員分まとめ）",
-                    data=zip_buf.getvalue(),
-                    file_name=f"seminar_reports_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.zip",
-                    mime="application/zip",
-                )
-                entry = {
-                    "utc": datetime.now(timezone.utc).isoformat(),
-                    "speakers": [
-                        {
-                            "label": sp["label"],
-                            "profile": sp["profile"],
-                            "rows_after_filter": len(
-                                _apply_row_filter(
-                                    df,
-                                    sp["use_filter"],
-                                    sp["filter_col"],
-                                    sp["filter_values"],
-                                )
-                            ),
-                            "ok": ok,
-                            "message": msg,
-                        }
-                        for sp, (_, ok, msg) in zip(speaker_defs, results)
-                    ],
-                    "standard_columns_n": len(cols_std),
-                    "sponsor_extra_columns_n": len(cols_sponsor_extra),
+                    layouts_map[col] = layout_label_to_key[opt_label]
+            pattern_specs.append(
+                {
+                    "name": pn,
+                    "title": pt,
+                    "subtitle": ps,
+                    "filename": _safe_pptx_filename(pfn, f"report_{i + 1}"),
+                    "columns": sel,
+                    "layouts": layouts_map,
                 }
-                st.session_state.audit_log.append(entry)
+            )
 
-            with st.expander("一括変換ログ"):
-                st.text("".join(combined_log))
+if delivery.startswith("登壇者別"):
+    st.subheader("登壇者ごとの設定")
+    n_speakers = st.number_input("登壇者数", min_value=1, max_value=8, value=3, step=1)
+    speaker_defs = []
+    for i in range(int(n_speakers)):
+        with st.expander(f"登壇者 {i + 1}", expanded=(i == 0)):
+            sp_name = st.text_input("表示名", value=f"登壇者{i + 1}", key=f"sp_{i}_label")
+            pat_pick = st.number_input(
+                "使うパターン（1 始まり）",
+                min_value=1,
+                max_value=npat,
+                value=1,
+                step=1,
+                key=f"sp_{i}_pat",
+            )
+            t1, t2 = st.columns(2)
+            with t1:
+                sp_title = st.text_input("スライドタイトル上書き（任意・空ならパターン設定）", key=f"sp_{i}_title", value="")
+            with t2:
+                sp_sub = st.text_input("サブタイトル上書き（任意）", key=f"sp_{i}_sub", value="")
+
+            use_f = st.checkbox("行フィルタでセッション絞り込み", value=False, key=f"sp_{i}_use_filter")
+            filter_col, filter_vals = None, []
+            if use_f:
+                filter_col = st.selectbox("フィルタ列", [""] + list(df.columns), key=f"sp_{i}_fcol")
+                if filter_col and filter_col in df.columns:
+                    uniques = sorted(
+                        df[filter_col].dropna().astype(str).str.strip().unique().tolist(),
+                        key=str,
+                    )
+                    if len(uniques) > 200:
+                        st.caption(f"{len(uniques)} 件中 200 件まで表示")
+                        uniques = uniques[:200]
+                    filter_vals = st.multiselect("含める値", options=uniques, key=f"sp_{i}_fval")
+
+            out_fn = st.text_input(
+                "ZIP 内ファイル名",
+                value=_safe_pptx_filename(sp_name, f"speaker_{i + 1}"),
+                key=f"sp_{i}_file",
+            )
+            speaker_defs.append(
+                {
+                    "index": i,
+                    "label": sp_name,
+                    "pattern_1based": int(pat_pick),
+                    "title_ov": sp_title,
+                    "subtitle_ov": sp_sub,
+                    "use_filter": use_f,
+                    "filter_col": filter_col if filter_col else None,
+                    "filter_values": filter_vals,
+                    "out_name": out_fn,
+                }
+            )
+else:
+    speaker_defs = []
+
+# ── プリセット / 監査（簡易）──────────────────────────────────────────────
+with st.expander("列プリセット（パターン1の列名リストの保存・JSON）"):
+    preset_name = st.text_input("プリセット名", key="preset_name_input")
+    if st.button("パターン1の列を保存"):
+        if not preset_name.strip():
+            st.error("名前を入力してください。")
+        elif not pattern_specs:
+            st.error("パターンがありません。")
+        else:
+            st.session_state.column_presets[preset_name.strip()] = {
+                "columns": list(pattern_specs[0]["columns"]),
+                "layouts": dict(pattern_specs[0]["layouts"]),
+            }
+            st.success("保存しました。")
+    names = list(st.session_state.column_presets.keys())
+    lp = st.selectbox("読み込み", [""] + names, key="preset_load_pick")
+    if lp and st.button("パターン1に適用"):
+        p = st.session_state.column_presets[lp]
+        valid = set(df.columns)
+        st.session_state["p0_cols"] = [c for c in p.get("columns", []) if c in valid]
+        for c, ly in p.get("layouts", {}).items():
+            if c in valid and c in st.session_state["p0_cols"]:
+                h = _col_widget_hash(c)
+                # selectbox はラベルで状態を持つ — キーを直接書き換え
+                lab = next((lbl for k, lbl in COLUMN_LAYOUT_CHOICES_UI if k == ly), layout_labels[0])
+                st.session_state[f"p0_lay_{h}"] = lab
+        st.rerun()
+    st.download_button(
+        "プリセット JSON をダウンロード",
+        data=json.dumps(st.session_state.column_presets, ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name="survey_pptx_column_presets.json",
+        mime="application/json",
+    )
+    ju = st.file_uploader("JSON を取り込み", type=["json"], key="preset_upload")
+    if ju is not None:
+        try:
+            obj = json.loads(ju.getvalue().decode("utf-8"))
+            if isinstance(obj, dict):
+                st.session_state.column_presets.update(obj)
+                st.success("マージしました。")
+            else:
+                st.error("オブジェクト形式の JSON が必要です。")
+        except json.JSONDecodeError as e:
+            st.error(str(e))
+
+with st.expander("監査ログ（セッション）"):
+    for entry in reversed(st.session_state.audit_log[-20:]):
+        st.json(entry)
+    if st.button("監査ログをクリア"):
+        st.session_state.audit_log = []
+        st.rerun()
+
+# ── 生成ボタン ─────────────────────────────────────────────────────────────
+all_patterns_ok = all(spec["columns"] for spec in pattern_specs)
+if not all_patterns_ok:
+    st.warning("各パターンで少なくとも 1 列を選んでください。")
+
+if delivery.startswith("パターン別"):
+    gen = st.button("PowerPoint を生成", type="primary", disabled=not all_patterns_ok)
+    if gen and all_patterns_ok:
+        if npat == 1:
+            spec = pattern_specs[0]
+            sub = df[[c for c in spec["columns"] if c in df.columns]]
+            lay = {c: spec["layouts"].get(c, COLUMN_LAYOUT_AUTO) for c in sub.columns}
+            with tempfile.TemporaryDirectory() as tmpd:
+                out_p = Path(tmpd) / spec["filename"]
+                log = _run_convert_captured(
+                    out_p, sub, spec["title"], spec["subtitle"], enc, template_path_str, lay
+                )
+                if out_p.exists():
+                    st.success("生成しました。")
+                    st.download_button(
+                        "📥 ダウンロード",
+                        data=out_p.read_bytes(),
+                        file_name=spec["filename"],
+                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    )
+                    st.session_state.audit_log.append(
+                        {
+                            "utc": datetime.now(timezone.utc).isoformat(),
+                            "mode": "pattern",
+                            "file": spec["filename"],
+                            "columns": spec["columns"],
+                        }
+                    )
+                else:
+                    st.error("生成に失敗しました。")
+                with st.expander("ログ"):
+                    st.text(log)
+        else:
+            zip_buf = io.BytesIO()
+            logs = []
+            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for spec in pattern_specs:
+                    sub = df[[c for c in spec["columns"] if c in df.columns]]
+                    lay = {c: spec["layouts"].get(c, COLUMN_LAYOUT_AUTO) for c in sub.columns}
+                    with tempfile.TemporaryDirectory() as tmpd:
+                        out_p = Path(tmpd) / "out.pptx"
+                        log = _run_convert_captured(
+                            out_p, sub, spec["title"], spec["subtitle"], enc, template_path_str, lay
+                        )
+                        logs.append(f"=== {spec['name']} ===\n{log}\n")
+                        if out_p.exists():
+                            zf.writestr(spec["filename"], out_p.read_bytes())
+            st.success("ZIP を作成しました。")
+            st.download_button(
+                "📦 ZIP をダウンロード",
+                data=zip_buf.getvalue(),
+                file_name=f"reports_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.zip",
+                mime="application/zip",
+            )
+            st.session_state.audit_log.append(
+                {
+                    "utc": datetime.now(timezone.utc).isoformat(),
+                    "mode": "pattern_zip",
+                    "patterns": [s["filename"] for s in pattern_specs],
+                }
+            )
+            with st.expander("ログ"):
+                st.text("".join(logs))
 
 else:
-    st.info("👆 CSV または XLSX ファイルをアップロードしてください。")
+    gen = st.button("登壇者分を ZIP 生成", type="primary", disabled=not all_patterns_ok)
+    if gen and all_patterns_ok and speaker_defs:
+        zip_buf = io.BytesIO()
+        results = []
+        logs = []
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for sp in speaker_defs:
+                tag = sp["label"] or f"speaker{sp['index'] + 1}"
+                pidx = sp["pattern_1based"] - 1
+                if pidx < 0 or pidx >= len(pattern_specs):
+                    results.append((tag, False, "パターン番号が無効です"))
+                    continue
+                spec = pattern_specs[pidx]
+                try:
+                    sub_full = _apply_row_filter(
+                        df, sp["use_filter"], sp["filter_col"], sp["filter_values"]
+                    )
+                    if len(sub_full) == 0:
+                        results.append((tag, False, "フィルタ後 0 件"))
+                        continue
+                    use_cols = [c for c in spec["columns"] if c in sub_full.columns]
+                    if not use_cols:
+                        results.append((tag, False, "列がありません"))
+                        continue
+                    sub = sub_full[use_cols]
+                    lay = {c: spec["layouts"].get(c, COLUMN_LAYOUT_AUTO) for c in sub.columns}
+                    title_u = sp["title_ov"].strip() or spec["title"]
+                    sub_u = sp["subtitle_ov"].strip() or spec["subtitle"]
+                    with tempfile.TemporaryDirectory() as tmpd:
+                        out_p = Path(tmpd) / "out.pptx"
+                        log_piece = _run_convert_captured(
+                            out_p, sub, title_u, sub_u, enc, template_path_str, lay
+                        )
+                        logs.append(f"=== {tag} ===\n{log_piece}\n")
+                        if not out_p.exists():
+                            results.append((tag, False, "PPTX が生成されませんでした"))
+                            continue
+                        name_in_zip = _safe_pptx_filename(
+                            sp["out_name"].replace(".pptx", ""), f"sp_{sp['index'] + 1}"
+                        )
+                        zf.writestr(name_in_zip, out_p.read_bytes())
+                        results.append((tag, True, f"{len(sub_full)} 行"))
+                except Exception as ex:
+                    results.append((tag, False, str(ex)))
+        for tag, ok, msg in results:
+            if ok:
+                st.success(f"{tag}: {msg}")
+            else:
+                st.error(f"{tag}: {msg}")
+        if any(ok for _, ok, _ in results):
+            st.download_button(
+                "📦 ZIP をダウンロード",
+                data=zip_buf.getvalue(),
+                file_name=f"seminar_reports_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.zip",
+                mime="application/zip",
+            )
+            st.session_state.audit_log.append(
+                {
+                    "utc": datetime.now(timezone.utc).isoformat(),
+                    "mode": "speakers_zip",
+                    "results": [{"tag": t, "ok": o, "msg": m} for t, o, m in results],
+                }
+            )
+        with st.expander("ログ"):
+            st.text("".join(logs))

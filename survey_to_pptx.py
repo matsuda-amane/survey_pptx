@@ -75,6 +75,22 @@ BUILTIN_PPTX_SPECS: tuple[tuple[str, str], ...] = (
     ("template_amane.pptx", "Amane"),
 )
 
+# UI・convert 共通: 列ごとのレイアウト上書き（auto は従来の自動判定）
+COLUMN_LAYOUT_AUTO = "auto"
+COLUMN_LAYOUT_SELECTION_CHART = "selection_chart"
+COLUMN_LAYOUT_PIE_ONLY = "pie_only"
+COLUMN_LAYOUT_FREE_TEXT = "free_text_table"
+COLUMN_LAYOUT_APPENDIX_LIST = "appendix_list"
+
+# (キー, 短い説明) — Streamlit の selectbox 用
+COLUMN_LAYOUT_CHOICES_UI: tuple[tuple[str, str], ...] = (
+    (COLUMN_LAYOUT_AUTO, "自動（列の種類に合わせる）"),
+    (COLUMN_LAYOUT_SELECTION_CHART, "選択肢グラフ（棒＋円）"),
+    (COLUMN_LAYOUT_PIE_ONLY, "円グラフのみ"),
+    (COLUMN_LAYOUT_FREE_TEXT, "自由記述テーブル"),
+    (COLUMN_LAYOUT_APPENDIX_LIST, "一覧表（Appendix 向け）"),
+)
+
 
 def list_builtin_templates() -> list[tuple[str, Path]]:
     """存在する内蔵テンプレのみ (ラベル, パス) を返す（Streamlit の selectbox 用）。"""
@@ -728,16 +744,90 @@ def _add_stat_card(slide, title: str, value: str,
                  value, 15, bold=True, color=THEME["text_light"])
 
 
+def _appendix_deferred(column_layout: dict[str, str] | None, col: str, q_type: str) -> bool:
+    """会社名など Appendix を末尾にまとめる列か（自動または一覧表指定で末尾ブロックへ）"""
+    if q_type != "appendix_company":
+        return False
+    ov = (column_layout or {}).get(col, COLUMN_LAYOUT_AUTO)
+    return ov in (COLUMN_LAYOUT_AUTO, COLUMN_LAYOUT_APPENDIX_LIST)
+
+
+def _emit_question_slides(
+    prs: Presentation,
+    df: pd.DataFrame,
+    col: str,
+    q_type: str,
+    layout: str,
+    col_idx: int,
+    q_num: int,
+    total: int,
+) -> int:
+    """
+    1 列分のスライドを追加。q_num を返す（追加分は 1 とみなす。多言語複数枚は 1 問として扱う）。
+    """
+    label = str(col)
+    if layout == COLUMN_LAYOUT_AUTO or not layout:
+        if col_idx == PIE_ONLY_COLUMN_INDEX and q_type != "appendix_company":
+            add_pie_only_slide(prs, df[col], label, q_num, total)
+            return q_num + 1
+        if q_type in ("categorical", "high_cardinality"):
+            s = df[col].dropna().astype(str).str.strip()
+            is_4scale = any(v in s.values for v in SCALE_4_ORDER)
+            add_categorical_slide(
+                prs, df[col], label, q_num, total,
+                ordered_values=SCALE_4_ORDER if is_4scale else None,
+                colors=SCALE_4_COLORS if is_4scale else None,
+                top_n=TOP_N_HIGH_CARDINALITY if q_type == "high_cardinality" else None,
+            )
+            return q_num + 1
+        if q_type == "text":
+            add_text_slides(prs, df[col], label, q_num, total)
+            return q_num + 1
+        return q_num
+
+    if layout == COLUMN_LAYOUT_PIE_ONLY:
+        add_pie_only_slide(prs, df[col], label, q_num, total)
+        return q_num + 1
+
+    if layout == COLUMN_LAYOUT_SELECTION_CHART:
+        s = df[col].dropna().astype(str).str.strip()
+        is_4scale = any(v in s.values for v in SCALE_4_ORDER)
+        top_n = None
+        if q_type == "high_cardinality":
+            top_n = TOP_N_HIGH_CARDINALITY
+        elif q_type == "text":
+            top_n = TOP_N_HIGH_CARDINALITY
+        add_categorical_slide(
+            prs, df[col], label, q_num, total,
+            ordered_values=SCALE_4_ORDER if is_4scale else None,
+            colors=SCALE_4_COLORS if is_4scale else None,
+            top_n=top_n,
+        )
+        return q_num + 1
+
+    if layout == COLUMN_LAYOUT_FREE_TEXT:
+        add_text_slides(prs, df[col], label, q_num, total)
+        return q_num + 1
+
+    if layout == COLUMN_LAYOUT_APPENDIX_LIST:
+        add_appendix_company_slides(prs, df[col], label, total)
+        return q_num + 1
+
+    return q_num
+
+
 # ── メイン変換処理 ────────────────────────────────────────────────────────────
 
 def convert(data_path: str | None, output_path: str,
             title: str = "", subtitle: str = "",
             encoding: str = "utf-8",
             template_path: str | Path | None = None,
-            df: pd.DataFrame | None = None) -> None:
+            df: pd.DataFrame | None = None,
+            column_layout: dict[str, str] | None = None) -> None:
     """
     data_path または df のどちらか必須。df を渡すとメモリ上の DataFrame を変換し、
     data_path の読み込みは行わない（CLI は従来どおりファイルパスのみ）。
+    column_layout: 列名 → レイアウトキー（COLUMN_LAYOUT_*）。未指定・auto は従来の自動判定。
     """
     if df is None:
         if not data_path:
@@ -791,35 +881,23 @@ def convert(data_path: str | None, output_path: str,
         add_summary_slide(prs, df, col_types, total)
 
     q_num = 1
-    appendix_company_cols = [c for c, t in col_types.items() if t == "appendix_company"]
+    appendix_company_cols = [
+        c for c in df.columns
+        if col_types.get(c) == "appendix_company" and _appendix_deferred(column_layout, c, "appendix_company")
+    ]
 
-    for col, q_type in col_types.items():
-        if q_type in ("personal", "metadata", "empty", "appendix_company"):
+    for col in df.columns:
+        q_type = col_types.get(col, "empty")
+        if q_type in ("personal", "metadata", "empty"):
+            continue
+        if q_type == "appendix_company" and col in appendix_company_cols:
             continue
 
-        label = str(col)
+        layout = (column_layout or {}).get(col, COLUMN_LAYOUT_AUTO)
         col_idx = df.columns.get_loc(col) if col in df.columns else -1
-
-        # 元データのP列（16列目）は円グラフ1枚で表示
-        if col_idx == PIE_ONLY_COLUMN_INDEX:
-            add_pie_only_slide(prs, df[col], label, q_num, total)
-            q_num += 1
-            continue
-
-        if q_type in ("categorical", "high_cardinality"):
-            s = df[col].dropna().astype(str).str.strip()
-            is_4scale = any(v in s.values for v in SCALE_4_ORDER)
-            add_categorical_slide(
-                prs, df[col], label, q_num, total,
-                ordered_values = SCALE_4_ORDER if is_4scale else None,
-                colors         = SCALE_4_COLORS if is_4scale else None,
-                top_n          = TOP_N_HIGH_CARDINALITY if q_type == "high_cardinality" else None,
-            )
-
-        elif q_type == "text":
-            add_text_slides(prs, df[col], label, q_num, total)
-
-        q_num += 1
+        q_num = _emit_question_slides(
+            prs, df, col, q_type, layout, col_idx, q_num, total,
+        )
 
     # Appendix: セクションタイトル + 会社名などを表で最後に追加
     if appendix_company_cols:
