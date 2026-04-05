@@ -26,62 +26,8 @@ git branch -M main
 git push -u origin main
 ```
 
-> **テンプレートの置き場所**: このリポジトリ直下の `template/` に置くか、後述の **git submodule** でプライベートリポジトリから取り込みます。`data/` 内の実データ（xlsx/csv/pptx）は .gitignore で除外されます。
-
----
-
-## 1 bis. テンプレートをプライベートリポジトリで管理する（git submodule）
-
-パブリックなメインリポジトリに `.pptx` を載せたくないときの定番のやり方です。**`template` 用に別リポジトリを作り、このリポジトリでは `template` フォルダを submodule として参照**します。
-
-### 手順の流れ（比喩）
-
-- **メインの箱**（survey_pptx）＝ コードや Streamlit。みんなに見せてよいもの。
-- **テンプレだけの鍵付きの箱**（private repo）＝ 中身の pptx。ここだけプライベート。
-- **submodule**＝「メインの箱の `template` という棚は、あっちの鍵付き箱の中身をそのまま指す印」です。
-
-### A. プライベート側リポジトリを用意する
-
-1. GitHub などで **新しい Private リポジトリ** を作る（例: `survey_pptx-templates`）。
-2. いまの `template/` と同じファイル名で、**ルートに** `.pptx` を push する。  
-   （`template_ligare.pptx` / `template_amane.pptx` など。アプリは `template/` 直下＝ submodule のルートを読みます。サブフォルダにしないこと。）
-
-### B. メインリポジトリで submodule を登録する
-
-リポジトリのルートで:
-
-```bash
-chmod +x scripts/setup_template_submodule.sh
-./scripts/setup_template_submodule.sh git@github.com:<あなた>/<survey_pptx-templates>.git
-```
-
-スクリプト後に表示どおり `git add` / `git commit` / `git push` する。
-
-**初めて clone する人**は、次のどちらかが必要です。
-
-```bash
-git clone --recurse-submodules <メインリポジトリのURL>
-# 既に clone 済みなら
-git submodule update --init --recursive
-```
-
-### C. Streamlit Community Cloud での注意
-
-- デプロイ時に **サブモジュールを取得できるか** は、ホストの clone 設定と **サブモジュール側リポジトリへのアクセス権** に依存します。
-- **メインがパブリック・テンプレだけプライベート** のとき、無料の Community Cloud だけではサブモジュール用の認証が足りず、`template/` が空のままビルドに失敗することがあります。
-- その場合の例: **メインも Private にして** Streamlit にアクセス許可する、別ホスト（Render など）でデプロイ鍵を設定する、テンプレをビルド前にコピーする CI を別途用意する、など。
-
-どうなるかは必ず **再デプロイしてログを確認** してください。
-
-### D. テンプレの場所を環境変数で指定する（任意）
-
-サブモジュール以外に、コンテナ上で別パスにテンプレがある場合:
-
-```text
-SURVEY_PPTX_TEMPLATE_DIR=/path/to/dir
-```
-
-そのディレクトリに `template_ligare.pptx` などがある前提です（`survey_to_pptx` と `app` の両方で共通）。
+> **テンプレート**: `template/template_ligare.pptx`・`template/template_amane.pptx` などをこのリポジトリに含めて push してください（Streamlit Cloud は通常の `git clone` だけで `template/` が揃います）。`data/` 内の実データは .gitignore で除外されます。  
+> 別パスにテンプレを置く必要があるだけのときは、環境変数 **`SURVEY_PPTX_TEMPLATE_DIR`** を指定できます（そのディレクトリに `.pptx` がある前提）。
 
 ---
 
@@ -137,4 +83,4 @@ git push
 
 - **無料枠**: 一定時間アクセスがないとアプリがスリープし、次回アクセス時に起動まで数十秒かかることがあります
 - **パスワード**: シークレットは Streamlit の画面から再設定できます（Settings → Secrets）
-- **テンプレート**: 実行環境の `template/`（または submodule・`SURVEY_PPTX_TEMPLATE_DIR`）に、`template_ligare.pptx` / `template_amane.pptx` などが存在する必要があります
+- **テンプレート**: リポジトリの `template/` に `template_ligare.pptx` / `template_amane.pptx` などが含まれている必要があります（上書きで `SURVEY_PPTX_TEMPLATE_DIR` を使うことも可）

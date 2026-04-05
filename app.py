@@ -212,8 +212,7 @@ if not st.session_state.wizard_loaded:
     if template_path_str is None:
         st.error(
             "**テンプレートの PPTX が見つかりません。** このアプリは `template/` 内のファイルが必須です。\n\n"
-            "- **ローカル**: リポジトリルートで `git submodule update --init --recursive` を実行し、"
-            "`template/template_ligare.pptx` などがあるか確認してください。\n"
+            "- **リポジトリ**: `template/template_ligare.pptx` などが含まれているか、`git pull` 後に `ls template/*.pptx` で確認してください。\n"
             "- **環境変数** `SURVEY_PPTX_TEMPLATE_DIR` を指定している場合は、そのパスに .pptx があるか確認してください。"
         )
         st.caption(f"いま参照しているテンプレフォルダ: `{TEMPLATE_DIR}`")
