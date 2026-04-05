@@ -208,6 +208,18 @@ if not st.session_state.wizard_loaded:
         else None
     )
 
+    # can_load = ファイル選択済み かつ テンプレ .pptx が実在（どちらか欠けるとボタン非活性）
+    if template_path_str is None:
+        st.error(
+            "**テンプレートの PPTX が見つかりません。** このアプリは `template/` 内のファイルが必須です。\n\n"
+            "- **ローカル**: リポジトリルートで `git submodule update --init --recursive` を実行し、"
+            "`template/template_ligare.pptx` などがあるか確認してください。\n"
+            "- **環境変数** `SURVEY_PPTX_TEMPLATE_DIR` を指定している場合は、そのパスに .pptx があるか確認してください。"
+        )
+        st.caption(f"いま参照しているテンプレフォルダ: `{TEMPLATE_DIR}`")
+    elif uploaded is None:
+        st.info("**1.** のファイル選択で CSV または XLSX を選ぶと、読み込みボタンが押せるようになります。")
+
     can_load = uploaded is not None and template_path_str is not None
     if st.button("CSV / XLSX を読み込む", type="primary", disabled=not can_load):
         st.session_state.wizard_loaded = True
