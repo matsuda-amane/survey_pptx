@@ -23,14 +23,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from survey_to_pptx import (
     COLUMN_LAYOUT_AUTO,
     COLUMN_LAYOUT_CHOICES_UI,
+    TEMPLATE_DIR,
     convert,
     load_data,
     classify_columns,
     list_builtin_templates,
 )
 
-_TEMPLATE_ROOT = Path(__file__).resolve().parent / "template"
-_DEFAULT_TEMPLATE = _TEMPLATE_ROOT / "template_ligare.pptx"
+_DEFAULT_TEMPLATE = TEMPLATE_DIR / "template_ligare.pptx"
 
 st.set_page_config(
     page_title="アンケート → PPTX 変換",

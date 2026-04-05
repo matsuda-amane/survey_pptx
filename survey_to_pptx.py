@@ -12,6 +12,7 @@ CSV/XLSX アンケート結果 → PowerPoint 変換ツール
 """
 
 import argparse
+import os
 import re
 import sys
 from datetime import datetime
@@ -65,8 +66,18 @@ SCALE_4_COLORS = [
     RGBColor(0xFF, 0x6B, 0x6B),  # 赤
 ]
 
-# テンプレート（既存6枚はサンプルとして残す）
-TEMPLATE_DIR = Path(__file__).resolve().parent / "template"
+# テンプレート（既定はリポジトリの template/。サブモジュール or 環境変数で差し替え可）
+def _resolve_template_dir() -> Path:
+    root = Path(__file__).resolve().parent
+    override = (os.environ.get("SURVEY_PPTX_TEMPLATE_DIR") or "").strip()
+    if override:
+        p = Path(override).expanduser().resolve()
+        if p.is_dir():
+            return p
+    return root / "template"
+
+
+TEMPLATE_DIR = _resolve_template_dir()
 DEFAULT_TEMPLATE_PATH = TEMPLATE_DIR / "template_ligare.pptx"
 
 # 内蔵テンプレ（ファイル名, UI 用の短い名前）。スライドマスタのレイアウト順は互いに同一であること。
